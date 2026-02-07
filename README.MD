@@ -19,7 +19,7 @@ Browser Spkr ◀──PCM16── Quart Server ◀──SDK── Azure Voice Li
 3. The server relays it to Azure Voice Live, which runs a GPT realtime model.
 4. The model's spoken response streams back to the browser in real time.
 5. Two local tools (`get_stock_price`, `tell_joke`) demonstrate function calling.
-6. Two remote MCP servers (DeepWiki, Microsoft Learn) let the model query external knowledge.
+6. One remote MCP server (Microsoft Learn) lets the model query external documentation.
 
 ## Architecture
 
@@ -41,7 +41,6 @@ graph LR
     end
 
     subgraph MCP ["🌐 MCP Servers (Remote)"]
-        DW["DeepWiki"]
         ML["Microsoft Learn"]
     end
 
@@ -55,9 +54,7 @@ graph LR
     AGENT -. "execute" .-> TOOLS
     TOOLS -. "result" .-> AGENT
     AGENT -. "tool output" .-> VL
-    VL == "MCP call\n(HTTPS)" ==> DW
     VL == "MCP call\n(HTTPS)" ==> ML
-    DW == "result" ==> VL
     ML == "result" ==> VL
 ```
 
@@ -150,17 +147,24 @@ Defined in `tools.py`. Each local tool has:
 To add a new local tool, add a `FunctionTool(...)` to `TOOL_DEFINITIONS` and a
 matching handler to `TOOL_HANDLERS`. The voice agent picks them up automatically.
 
-### Remote MCP Servers
+### Remote MCP Servers (via MCP)
 
-Defined in `mcp_servers.json`. MCP (Model Context Protocol) servers are external
-HTTPS endpoints that Azure Voice Live connects to **directly** — your code never
-proxies the MCP traffic. The model discovers available tools from each server and
-can call them during conversation.
+This sample includes **Model Context Protocol (MCP)** support, which lets the
+voice agent call external tools hosted on remote servers — without writing any
+local handler code.
 
-**Important**: MCP servers must be publicly reachable HTTPS URLs because Azure's
-cloud service connects to them server-side (not your local machine).
+#### How it works
 
-To add a new MCP server, add an entry to `mcp_servers.json`:
+1. You list MCP servers in **`mcp_servers.json`** (URL + label).
+2. On startup, `tools.py` reads the file and creates `MCPServer` objects.
+3. `voice_agent.py` passes them alongside local `FunctionTool`s in the session config.
+4. Azure Voice Live connects to each MCP server **directly over HTTPS** (server-side),
+   discovers available tools, and the model can call them during conversation.
+5. Your code only observes the results — it never proxies the MCP traffic.
+
+#### Adding an MCP server
+
+Edit `mcp_servers.json` and add an entry:
 
 ```json
 {
@@ -174,8 +178,25 @@ To add a new MCP server, add an entry to `mcp_servers.json`:
 |---|---|---|
 | `server_label` | Yes | A short name for this server |
 | `server_url` | Yes | Publicly reachable HTTPS URL |
-| `allowed_tools` | No | List of specific tool names to allow (omit for all) |
+| `allowed_tools` | No | List of specific tool names to allow (omit = all) |
 | `require_approval` | No | `"never"` (default) or `"always"` |
+
+> **Key constraint:** MCP servers must be publicly reachable HTTPS endpoints
+> because Azure's cloud service connects to them server-side. Local `stdio`
+> MCP servers (like most coding-agent MCPs) will **not** work.
+
+#### Finding MCP servers
+
+Look for servers labelled ☁️ (cloud / remote HTTP) in the
+[Awesome MCP Servers](https://github.com/punkpeye/awesome-mcp-servers) list.
+Make sure they expose an HTTP/SSE endpoint and don't require an API key
+(or add the key to the `server_url` query string if they do).
+
+#### Currently configured
+
+| Server | URL | What it does |
+|---|---|---|
+| Microsoft Learn | `https://learn.microsoft.com/api/mcp` | Official Microsoft docs — Azure, .NET, etc. |
 
 ## Adding a new tool — example
 
@@ -211,3 +232,5 @@ TOOL_HANDLERS["lookup_order"] = lookup_order
 | `speech_started` | Server → Client | Barge-in signal — stop playback |
 | `call_state` | Server → Client | Session state change (e.g. `ended`) |
 | `mcp_status` | Server → Client | MCP tool discovery / call status updates |
+
+
