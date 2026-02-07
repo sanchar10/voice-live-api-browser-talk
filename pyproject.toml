@@ -1,0 +1,15 @@
+[project]
+name = "voice-live-simple"
+version = "0.1.0"
+description = "Minimal Voice Live API sample — browser or mobile client streams audio to a Python server that relays it to Azure Voice Live."
+requires-python = ">=3.9"
+
+dependencies = [
+    "quart>=0.20.0",
+    "azure-ai-voicelive[aiohttp]>=1.1.0",
+    "python-dotenv>=1.1.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Voice Assistant</title>
+    <link rel="stylesheet" href="/frontend/index.css" />
+</head>
+<body>
+    <div class="card">
+        <h1>🎙️ Voice Assistant</h1>
+        <p class="subtitle">Click the button and start talking</p>
+
+        <button id="talkBtn" onclick="toggleTalking()">Start Talking</button>
+
+        <div id="status" class="status"></div>
+
+        <div id="transcript" class="transcript">
+            <p class="placeholder">Conversation will appear here…</p>
+        </div>
+    </div>
+
+    <script src="/frontend/index.js"></script>
+</body>
+</html>
