@@ -1,0 +1,7 @@
+[
+    {
+        "server_label": "microsoft_learn",
+        "server_url": "https://learn.microsoft.com/api/mcp",
+        "require_approval": "never"
+    }
+]

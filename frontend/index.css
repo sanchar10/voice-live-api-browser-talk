@@ -104,6 +104,15 @@ button#talkBtn.active {
 
 .transcript .msg.assistant .role { color: #6366f1; }
 .transcript .msg.user .role      { color: #22c55e; }
+.transcript .msg.mcp .role       { color: #0ea5e9; }
+
+.transcript .msg.mcp {
+    background: #f0f9ff;
+    border-left: 3px solid #0ea5e9;
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 0.85rem;
+}
 
 .transcript .msg .text {
     color: #333;

@@ -4,6 +4,9 @@ A bare-bones voice assistant that connects a browser (or any WebSocket client) t
 **Azure Voice Live API** using the official
 [`azure-ai-voicelive`](https://pypi.org/project/azure-ai-voicelive/) Python SDK.
 
+Includes both **local function tools** and **remote MCP (Model Context Protocol)
+servers** — so the model can call external services directly over HTTPS.
+
 ## What it does
 
 ```
@@ -15,7 +18,8 @@ Browser Spkr ◀──PCM16── Quart Server ◀──SDK── Azure Voice Li
 2. Audio streams over a WebSocket to the Python server.
 3. The server relays it to Azure Voice Live, which runs a GPT realtime model.
 4. The model's spoken response streams back to the browser in real time.
-5. Two dummy tools (`get_stock_price`, `get_weather`) demonstrate function calling.
+5. Two local tools (`get_stock_price`, `tell_joke`) demonstrate function calling.
+6. Two remote MCP servers (DeepWiki, Microsoft Learn) let the model query external knowledge.
 
 ## Architecture
 
@@ -29,11 +33,16 @@ graph LR
     subgraph Server ["🐍 Python Server (Quart)"]
         WS["WebSocket\n/ws"]
         AGENT["VoiceLiveAgent"]
-        TOOLS["Tools\nget_stock_price\nget_weather"]
+        TOOLS["Local Tools\nget_stock_price\ntell_joke"]
     end
 
     subgraph Azure ["☁️ Azure AI Services"]
         VL["Voice Live API\n(GPT Realtime Model)"]
+    end
+
+    subgraph MCP ["🌐 MCP Servers (Remote)"]
+        DW["DeepWiki"]
+        ML["Microsoft Learn"]
     end
 
     MIC -- "PCM16 audio\n(binary frames)" --> WS
@@ -46,6 +55,10 @@ graph LR
     AGENT -. "execute" .-> TOOLS
     TOOLS -. "result" .-> AGENT
     AGENT -. "tool output" .-> VL
+    VL == "MCP call\n(HTTPS)" ==> DW
+    VL == "MCP call\n(HTTPS)" ==> ML
+    DW == "result" ==> VL
+    ML == "result" ==> VL
 ```
 
 ## Prerequisites
@@ -55,6 +68,7 @@ graph LR
 | Python | 3.9 or later |
 | Azure AI Services | A resource with **Voice Live** enabled |
 | API key | From the Azure portal → Keys and Endpoint |
+| SDK version | `azure-ai-voicelive >= 1.2.0b3` (pre-release, for MCP support) |
 
 ## Quick start
 
@@ -66,8 +80,8 @@ python -m venv .venv
 .venv\Scripts\activate      # Windows
 # source .venv/bin/activate  # macOS / Linux
 
-# 2. Install dependencies
-pip install .
+# 2. Install dependencies (--pre to get MCP-enabled beta SDK)
+pip install --pre .
 
 # 3. Create your .env file from the example
 copy .env.example .env      # Windows
@@ -86,8 +100,9 @@ python server.py
 
 ```
 ├── server.py              Quart web server — serves frontend & WebSocket endpoint
-├── voice_agent.py         Voice Live session manager (SDK connect, events, tools)
-├── tools.py               Tool definitions + dummy handlers (stock price, weather)
+├── voice_agent.py         Voice Live session manager (SDK connect, events, tools + MCP)
+├── tools.py               Local tool definitions + MCP server loader
+├── mcp_servers.json       Remote MCP server config (edit to add/remove servers)
 ├── pyproject.toml         Python package metadata & dependencies
 ├── .env.example           Template — copy to .env and add your credentials
 ├── .env                   Your Azure credentials (git-ignored, you create this)
@@ -112,6 +127,7 @@ browsers *and* native mobile apps (e.g. a future iOS client):
 | Server → Client | text | JSON: `{"type":"transcript","role":"user","text":"..."}` |
 | Server → Client | text | JSON: `{"type":"speech_started"}` (barge-in signal) |
 | Server → Client | text | JSON: `{"type":"call_state","state":"ended"}` |
+| Server → Client | text | JSON: `{"type":"mcp_status","text":"..."}` (MCP updates) |
 
 ### iOS integration notes
 
@@ -123,12 +139,43 @@ via `AVAudioPlayerNode`.
 
 ## How tools work
 
-Tools are defined in `tools.py`. Each tool has:
+This sample demonstrates two kinds of tools:
+
+### Local FunctionTools
+
+Defined in `tools.py`. Each local tool has:
 1. A **`FunctionTool` schema** — tells the GPT model when and how to call it.
 2. A **handler function** — runs locally when the model decides to invoke it.
 
-To add a new tool, add a `FunctionTool(...)` to `TOOL_DEFINITIONS` and a matching
-handler to `TOOL_HANDLERS`. The voice agent picks them up automatically.
+To add a new local tool, add a `FunctionTool(...)` to `TOOL_DEFINITIONS` and a
+matching handler to `TOOL_HANDLERS`. The voice agent picks them up automatically.
+
+### Remote MCP Servers
+
+Defined in `mcp_servers.json`. MCP (Model Context Protocol) servers are external
+HTTPS endpoints that Azure Voice Live connects to **directly** — your code never
+proxies the MCP traffic. The model discovers available tools from each server and
+can call them during conversation.
+
+**Important**: MCP servers must be publicly reachable HTTPS URLs because Azure's
+cloud service connects to them server-side (not your local machine).
+
+To add a new MCP server, add an entry to `mcp_servers.json`:
+
+```json
+{
+    "server_label": "my_server",
+    "server_url": "https://example.com/mcp",
+    "require_approval": "never"
+}
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `server_label` | Yes | A short name for this server |
+| `server_url` | Yes | Publicly reachable HTTPS URL |
+| `allowed_tools` | No | List of specific tool names to allow (omit for all) |
+| `require_approval` | No | `"never"` (default) or `"always"` |
 
 ## Adding a new tool — example
 
@@ -155,3 +202,12 @@ TOOL_DEFINITIONS.append(
 
 TOOL_HANDLERS["lookup_order"] = lookup_order
 ```
+
+## WebSocket JSON events reference
+
+| `type` | Direction | Description |
+|---|---|---|
+| `transcript` | Server → Client | User or assistant speech transcript |
+| `speech_started` | Server → Client | Barge-in signal — stop playback |
+| `call_state` | Server → Client | Session state change (e.g. `ended`) |
+| `mcp_status` | Server → Client | MCP tool discovery / call status updates |

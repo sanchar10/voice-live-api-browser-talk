@@ -165,6 +165,9 @@ function handleJsonEvent(data) {
         case "transcript":
             addTranscript(data.role, data.text);
             break;
+        case "mcp_status":
+            addTranscript("mcp", data.text);
+            break;
         case "speech_started":
             // User started speaking — clear the playback buffer (barge-in)
             if (playbackWorklet) {

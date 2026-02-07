@@ -32,22 +32,32 @@ from azure.ai.voicelive.models import (
     FunctionCallOutputItem,
     InputAudioFormat,
     ItemType,
+    MCPApprovalResponseRequestItem,
     Modality,
     OutputAudioFormat,
     RequestSession,
+    ResponseMCPApprovalRequestItem,
+    ResponseMCPCallItem,
+    ResponseMCPListToolItem,
+    ServerEventConversationItemCreated,
+    ServerEventResponseFunctionCallArgumentsDone,
+    ServerEventResponseMcpCallCompleted,
+    ServerEventResponseOutputItemDone,
     ServerEventType,
     ServerVad,
     ToolChoiceLiteral,
-    ServerEventConversationItemCreated,
-    ServerEventResponseFunctionCallArgumentsDone,
 )
 
-from tools import TOOL_DEFINITIONS, TOOL_HANDLERS
+from tools import TOOL_DEFINITIONS, TOOL_HANDLERS, MCP_SERVERS
 
 logger = logging.getLogger(__name__)
 
-# The system prompt — intentionally simple
-INSTRUCTIONS = "You are a helpful assistant. Be polite and do what the user asks."
+# The system prompt
+INSTRUCTIONS = """\
+You are a helpful voice assistant. Be polite, concise, and do what the user asks.
+You have access to external tools via MCP servers — use them when the user asks
+questions about Microsoft documentation, Azure services, .NET, or similar topics.
+"""
 
 
 class VoiceLiveAgent:
@@ -85,6 +95,7 @@ class VoiceLiveAgent:
                 endpoint=self.endpoint,
                 credential=credential,
                 model=self.model,
+                api_version="2026-01-01-preview",  # required for MCP support
             ) as conn:
                 # Configure the session
                 await self._setup_session(conn)
@@ -140,7 +151,7 @@ class VoiceLiveAgent:
                 silence_duration_ms=500,
             ),
             input_audio_transcription=AudioInputTranscriptionOptions(model="whisper-1"),
-            tools=TOOL_DEFINITIONS,
+            tools=TOOL_DEFINITIONS + MCP_SERVERS,
             tool_choice=ToolChoiceLiteral.AUTO,
         )
         await conn.session.update(session=session)
@@ -186,6 +197,36 @@ class VoiceLiveAgent:
                 elif etype == ServerEventType.CONVERSATION_ITEM_CREATED:
                     await self._handle_conversation_item(event, conn)
 
+                # ----- MCP events -----
+                elif etype == ServerEventType.MCP_LIST_TOOLS_COMPLETED:
+                    tools = getattr(event, "tools", []) or []
+                    labels = [getattr(t, "name", "?") for t in tools]
+                    logger.info("MCP tools discovered: %s", labels)
+                    await self._send_json({
+                        "type": "mcp_status",
+                        "text": f"MCP tools available: {', '.join(labels)}",
+                    })
+
+                elif etype == ServerEventType.MCP_LIST_TOOLS_FAILED:
+                    logger.warning("MCP list-tools failed: %s", event)
+                    await self._send_json({
+                        "type": "mcp_status",
+                        "text": "MCP server tool discovery failed",
+                    })
+
+                elif etype == ServerEventType.RESPONSE_MCP_CALL_IN_PROGRESS:
+                    logger.info("MCP call in progress…")
+
+                elif etype == ServerEventType.RESPONSE_MCP_CALL_COMPLETED:
+                    await self._handle_mcp_call_completed(event, conn)
+
+                elif etype == ServerEventType.RESPONSE_MCP_CALL_FAILED:
+                    logger.error("MCP call failed: %s", event)
+                    await self._send_json({
+                        "type": "mcp_status",
+                        "text": "MCP tool call failed",
+                    })
+
                 elif etype == ServerEventType.ERROR:
                     logger.error("Voice Live error: %s", event.error.message)
 
@@ -199,10 +240,42 @@ class VoiceLiveAgent:
     # ------------------------------------------------------------------
 
     async def _handle_conversation_item(self, event, conn):
-        """If the model created a function-call item, execute the tool."""
+        """Handle conversation items — function calls, MCP calls, approvals."""
         if not isinstance(event, ServerEventConversationItemCreated):
             return
-        if event.item.type != ItemType.FUNCTION_CALL:
+
+        item_type = event.item.type
+
+        # --- MCP call (server-side, we just observe) ---
+        if item_type == ItemType.MCP_CALL:
+            tool_name = getattr(event.item, "name", "unknown")
+            server = getattr(event.item, "server_label", "")
+            logger.info("MCP call created: %s (server=%s)", tool_name, server)
+            await self._send_json({
+                "type": "mcp_status",
+                "text": f"Calling MCP tool: {tool_name} on {server}",
+            })
+            return
+
+        # --- MCP list-tools item ---
+        if item_type == ItemType.MCP_LIST_TOOLS:
+            logger.info("MCP list-tools item created")
+            return
+
+        # --- MCP approval request → auto-approve ---
+        if item_type == ItemType.MCP_APPROVAL_REQUEST:
+            if isinstance(event.item, ResponseMCPApprovalRequestItem):
+                req_id = event.item.approval_request_id
+                logger.info("Auto-approving MCP approval request: %s", req_id)
+                approval = MCPApprovalResponseRequestItem(
+                    approval_request_id=req_id,
+                    approve=True,
+                )
+                await conn.conversation.item.create(item=approval)
+            return
+
+        # --- Local function call ---
+        if item_type != ItemType.FUNCTION_CALL:
             return
 
         function_name = event.item.name
@@ -246,6 +319,38 @@ class VoiceLiveAgent:
             logger.error("Timeout waiting for tool call completion: %s", function_name)
         except Exception:
             logger.exception("Error handling tool call: %s", function_name)
+
+    # ------------------------------------------------------------------
+    # MCP call completion handler
+    # ------------------------------------------------------------------
+
+    async def _handle_mcp_call_completed(self, event, conn):
+        """Log the MCP call result. The service auto-feeds it back to the model."""
+        try:
+            # Wait for the output item to be fully done
+            output_event = await self._wait_for_event(
+                conn, ServerEventType.RESPONSE_OUTPUT_ITEM_DONE, timeout_s=15.0,
+            )
+            if isinstance(output_event, ServerEventResponseOutputItemDone):
+                item = output_event.item
+                if isinstance(item, ResponseMCPCallItem):
+                    logger.info(
+                        "MCP call done: %s → %s",
+                        getattr(item, "name", "?"),
+                        (getattr(item, "output", "") or "")[:200],
+                    )
+                    await self._send_json({
+                        "type": "mcp_status",
+                        "text": f"MCP tool '{getattr(item, 'name', '?')}' returned a result",
+                    })
+
+            # Ask the model to generate a response using the MCP result
+            await conn.response.create()
+
+        except asyncio.TimeoutError:
+            logger.warning("Timeout waiting for MCP output item")
+        except Exception:
+            logger.exception("Error in MCP call completion handler")
 
     # ------------------------------------------------------------------
     # Audio sender — drains the queue and pushes to Voice Live
